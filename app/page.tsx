@@ -108,6 +108,16 @@ const filterOptions = [
   { key: "pending", label: "处理中" },
 ] as const;
 
+const slotFilterOptions = [
+  { key: "zero", label: "0 槽", description: "无有效候选", min: 0, max: 0 },
+  { key: "low", label: "1–5 槽", description: "轻量拼贴", min: 1, max: 5 },
+  { key: "medium", label: "6–9 槽", description: "标准拼贴", min: 6, max: 9 },
+  { key: "high", label: "10–19 槽", description: "密集拼贴", min: 10, max: 19 },
+  { key: "dense", label: "20+ 槽", description: "高密画面", min: 20, max: Infinity },
+] as const;
+
+type SlotFilter = "all" | (typeof slotFilterOptions)[number]["key"];
+
 function decisionLabel(decision: ResultItem["decision"]) {
   if (decision === "Y") return "收录";
   if (decision === "N") return "不收录";
@@ -128,11 +138,22 @@ function percent(value: number) {
   return `${Math.round(value * 100)}%`;
 }
 
+function matchesSlotFilter(item: ResultItem, slotFilter: SlotFilter) {
+  if (slotFilter === "all") return true;
+  const option = slotFilterOptions.find((candidate) => candidate.key === slotFilter);
+  if (!option) return true;
+  return (
+    item.metrics.effectiveSlots >= option.min &&
+    item.metrics.effectiveSlots <= option.max
+  );
+}
+
 export default function Home() {
   const [payload, setPayload] = useState<BatchPayload | null>(null);
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<(typeof filterOptions)[number]["key"]>("all");
+  const [slotFilter, setSlotFilter] = useState<SlotFilter>("all");
   const [sort, setSort] = useState("input");
   const [visibleCount, setVisibleCount] = useState(60);
   const [selected, setSelected] = useState<ResultItem | null>(null);
@@ -167,7 +188,7 @@ export default function Home() {
 
   useEffect(() => {
     setVisibleCount(60);
-  }, [filter, query, sort]);
+  }, [filter, query, slotFilter, sort]);
 
   useEffect(() => {
     if (!selected) return;
@@ -185,9 +206,9 @@ export default function Home() {
   const counts = payload?.batch.counts ?? emptyCounts;
   const completion = counts.total ? counts.completed / counts.total : 0;
 
-  const filtered = useMemo(() => {
+  const decisionFiltered = useMemo(() => {
     const normalized = query.trim().toLowerCase();
-    const list = (payload?.items ?? []).filter((item) => {
+    return (payload?.items ?? []).filter((item) => {
       const matchesFilter =
         filter === "all"
           ? true
@@ -201,13 +222,36 @@ export default function Home() {
         item.reason.toLowerCase().includes(normalized);
       return matchesFilter && matchesSearch;
     });
+  }, [filter, payload?.items, query]);
+
+  const slotStats = useMemo(() => {
+    const positive = decisionFiltered
+      .map((item) => item.metrics.effectiveSlots)
+      .filter((value) => value > 0);
+    return {
+      available: positive.length,
+      average: positive.length
+        ? positive.reduce((sum, value) => sum + value, 0) / positive.length
+        : 0,
+      maximum: positive.length ? Math.max(...positive) : 0,
+      buckets: Object.fromEntries(
+        slotFilterOptions.map((option) => [
+          option.key,
+          decisionFiltered.filter((item) => matchesSlotFilter(item, option.key)).length,
+        ]),
+      ) as Record<(typeof slotFilterOptions)[number]["key"], number>,
+    };
+  }, [decisionFiltered]);
+
+  const filtered = useMemo(() => {
+    const list = decisionFiltered.filter((item) => matchesSlotFilter(item, slotFilter));
     return list.sort((a, b) => {
       if (sort === "confidence") return b.confidence - a.confidence;
       if (sort === "score") return b.ruleScore - a.ruleScore;
       if (sort === "slots") return b.metrics.effectiveSlots - a.metrics.effectiveSlots;
       return (payload?.items.indexOf(a) ?? 0) - (payload?.items.indexOf(b) ?? 0);
     });
-  }, [filter, payload?.items, query, sort]);
+  }, [decisionFiltered, payload?.items, slotFilter, sort]);
 
   const copyLink = async () => {
     await navigator.clipboard.writeText(window.location.href);
@@ -292,6 +336,49 @@ export default function Home() {
         <div className="metric quiet">
           <span>视觉模型已处理</span>
           <strong>{counts.llm}</strong>
+        </div>
+      </section>
+
+      <section className="slot-band" aria-label="有效槽位统计与筛选">
+        <div className="slot-band-inner">
+          <div className="slot-band-heading">
+            <div>
+              <span className="section-kicker"><Layers3 size={15} />槽位结构</span>
+              <h2>有效槽位分布</h2>
+            </div>
+            <div className="slot-summary" aria-label="槽位统计摘要">
+              <span><strong>{slotStats.available}</strong> 有候选</span>
+              <span><strong>{slotStats.average.toFixed(1)}</strong> 平均槽位</span>
+              <span><strong>{slotStats.maximum}</strong> 最高槽位</span>
+            </div>
+          </div>
+          <div className="slot-filter-grid" role="tablist" aria-label="有效槽位筛选">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={slotFilter === "all"}
+              className={slotFilter === "all" ? "active" : ""}
+              onClick={() => setSlotFilter("all")}
+            >
+              <span>全部槽位</span>
+              <strong>{decisionFiltered.length}</strong>
+              <small>当前结果集</small>
+            </button>
+            {slotFilterOptions.map((option) => (
+              <button
+                key={option.key}
+                type="button"
+                role="tab"
+                aria-selected={slotFilter === option.key}
+                className={slotFilter === option.key ? "active" : ""}
+                onClick={() => setSlotFilter(option.key)}
+              >
+                <span>{option.label}</span>
+                <strong>{slotStats.buckets[option.key]}</strong>
+                <small>{option.description}</small>
+              </button>
+            ))}
+          </div>
         </div>
       </section>
 
